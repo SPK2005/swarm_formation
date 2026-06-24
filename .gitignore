@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.pyo
+
+.vscode/
+.idea/
+
+*.db3
+*.mcap
+*.bag
