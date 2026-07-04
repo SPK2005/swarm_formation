@@ -6,6 +6,7 @@ from rclpy.node import Node
 
 from geometry_msgs.msg import PoseStamped
 
+from math import sin, cos, atan2
 
 class FormationManager(Node):
 
@@ -44,21 +45,48 @@ class FormationManager(Node):
         y = msg.pose.position.y
         z = msg.pose.position.z
 
+        qx = msg.pose.orientation.x
+        qy = msg.pose.orientation.y
+        qz = msg.pose.orientation.z
+        qw = msg.pose.orientation.w
+
+        
+        leader_yaw = atan2(
+            2.0*(qw*qz + qx*qy),
+            1.0 - 2.0*(qy*qy + qz*qz)
+        )
+
+        g1x = -3.0
+        g1y = 0.0
+
+        g2x = 0.0
+        g2y = 3.0
+
+        g3x = 3.0
+        g3y = 0.0
+
+        c = cos(leader_yaw)
+        s = sin(leader_yaw)
+
         d1 = PoseStamped()
         d2 = PoseStamped()
         d3 = PoseStamped()
 
-        d1.pose.position.x = x - 3.0
-        d1.pose.position.y = y
+        d1.pose.position.x = x + g1x*c - g1y*s
+        d1.pose.position.y = y + g1x*s + g1y*c
         d1.pose.position.z = z
 
-        d2.pose.position.x = x
-        d2.pose.position.y = y + 3.0
+        d2.pose.position.x = x + g2x*c - g2y*s
+        d2.pose.position.y = y + g2x*s + g2y*c
         d2.pose.position.z = z
 
-        d3.pose.position.x = x + 3.0
-        d3.pose.position.y = y
+        d3.pose.position.x = x + g3x*c - g3y*s
+        d3.pose.position.y = y + g3x*s + g3y*c
         d3.pose.position.z = z
+
+        d1.pose.orientation = msg.pose.orientation
+        d2.pose.orientation = msg.pose.orientation
+        d3.pose.orientation = msg.pose.orientation
 
         self.pub1.publish(d1)
         self.pub2.publish(d2)

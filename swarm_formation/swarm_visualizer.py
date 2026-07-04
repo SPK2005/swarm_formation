@@ -39,6 +39,14 @@ class SwarmVisualizer(Node):
         self.drone2 = None
         self.drone3 = None
 
+        # PX4 odometry is per-spawn-origin; add each drone's spawn offset
+        # (NED, from start_swarm.sh ENU poses) to share one world frame.
+        self.spawn_ned = {
+            1: (-3.0, 0.0, 0.0),
+            2: (0.0,  3.0, 0.0),
+            3: (3.0,  0.0, 0.0),
+        }
+
         self.leader_history = []
         self.d1_history = []
         self.d2_history = []
@@ -100,10 +108,11 @@ class SwarmVisualizer(Node):
 
     def drone1_callback(self, msg):
 
+        sx, sy, sz = self.spawn_ned[1]
         pos = (
-            msg.position[0],
-            msg.position[1],
-            msg.position[2]
+            msg.position[0] + sx,
+            msg.position[1] + sy,
+            msg.position[2] + sz
         )
 
         self.drone1 = pos
@@ -115,10 +124,11 @@ class SwarmVisualizer(Node):
 
     def drone2_callback(self, msg):
 
+        sx, sy, sz = self.spawn_ned[2]
         pos = (
-            msg.position[0],
-            msg.position[1],
-            msg.position[2]
+            msg.position[0] + sx,
+            msg.position[1] + sy,
+            msg.position[2] + sz
         )
 
         self.drone2 = pos
@@ -130,10 +140,11 @@ class SwarmVisualizer(Node):
 
     def drone3_callback(self, msg):
 
+        sx, sy, sz = self.spawn_ned[3]
         pos = (
-            msg.position[0],
-            msg.position[1],
-            msg.position[2]
+            msg.position[0] + sx,
+            msg.position[1] + sy,
+            msg.position[2] + sz
         )
 
         self.drone3 = pos
@@ -156,9 +167,10 @@ class SwarmVisualizer(Node):
         marker.type = Marker.SPHERE
         marker.action = Marker.ADD
 
-        marker.pose.position.x = float(pos[0])
-        marker.pose.position.y = float(pos[1])
-        marker.pose.position.z = float(-pos[2])
+        # NED world -> ENU for display so rviz matches the Gazebo camera
+        marker.pose.position.x = float(pos[1])   # East
+        marker.pose.position.y = float(pos[0])   # North
+        marker.pose.position.z = float(-pos[2])  # Up
 
         marker.pose.orientation.w = 1.0
 
@@ -197,9 +209,9 @@ class SwarmVisualizer(Node):
 
             p = Point()
 
-            p.x = float(pos[0])
-            p.y = float(pos[1])
-            p.z = float(-pos[2])
+            p.x = float(pos[1])   # East
+            p.y = float(pos[0])   # North
+            p.z = float(-pos[2])  # Up
 
             marker.points.append(p)
 

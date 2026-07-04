@@ -43,6 +43,15 @@ class Plotter(Node):
         self.targets = {}
         self.positions = {}
 
+        # PX4 odometry is reported relative to each drone's own spawn point.
+        # Add the spawn offset (NED, from start_swarm.sh ENU poses) to put
+        # all drones in one shared world frame.
+        self.spawn_ned = {
+            1: (-3.0, 0.0, 0.0),
+            2: (0.0,  3.0, 0.0),
+            3: (3.0,  0.0, 0.0),
+        }
+
         # ==================================================
         # Desired Formation Distances
         #
@@ -279,10 +288,13 @@ class Plotter(Node):
 
     def odom_cb(self, msg, idx):
 
+        # Lift local-spawn odometry into the shared NED world frame so the
+        # logged errors reflect the TRUE formation, not the per-spawn fiction.
+        sx, sy, sz = self.spawn_ned[idx]
         self.positions[idx] = (
-            msg.position[0],
-            msg.position[1],
-            msg.position[2]
+            msg.position[0] + sx,
+            msg.position[1] + sy,
+            msg.position[2] + sz
         )
 
     # ======================================================
