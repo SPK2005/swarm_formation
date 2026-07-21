@@ -39,6 +39,12 @@ class FormationManager(Node):
             10
         )
 
+        self.pub4 = self.create_publisher(
+            PoseStamped,
+            '/drone4_target',
+            10
+        )
+
     def leader_callback(self,msg):
 
         x = msg.pose.position.x
@@ -56,14 +62,17 @@ class FormationManager(Node):
             1.0 - 2.0*(qy*qy + qz*qz)
         )
 
-        g1x = -3.0
-        g1y = 0.0
+        g1x = 3.0
+        g1y = 3.0
 
-        g2x = 0.0
+        g2x = -3.0
         g2y = 3.0
 
         g3x = 3.0
-        g3y = 0.0
+        g3y = -3.0
+
+        g4x = -3.0
+        g4y = -3.0
 
         c = cos(leader_yaw)
         s = sin(leader_yaw)
@@ -71,6 +80,7 @@ class FormationManager(Node):
         d1 = PoseStamped()
         d2 = PoseStamped()
         d3 = PoseStamped()
+        d4 = PoseStamped()
 
         d1.pose.position.x = x + g1x*c - g1y*s
         d1.pose.position.y = y + g1x*s + g1y*c
@@ -84,13 +94,19 @@ class FormationManager(Node):
         d3.pose.position.y = y + g3x*s + g3y*c
         d3.pose.position.z = z
 
+        d4.pose.position.x = x + g4x*c - g4y*s
+        d4.pose.position.y = y + g4x*s + g4y*c
+        d4.pose.position.z = z
+
         d1.pose.orientation = msg.pose.orientation
         d2.pose.orientation = msg.pose.orientation
         d3.pose.orientation = msg.pose.orientation
+        d4.pose.orientation = msg.pose.orientation
 
         self.pub1.publish(d1)
         self.pub2.publish(d2)
         self.pub3.publish(d3)
+        self.pub4.publish(d4)
 
 
 def main(args=None):

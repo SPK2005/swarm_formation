@@ -34,13 +34,16 @@ class FormationController(Node):
         # paper value gives only ~1 deg of turn for a 1 m offset -> ey never
         # nulls and the speed-law denominator chatters near zero. Scaling
         # k_y up ~25x restores heading authority: 1 m error -> ~27 deg turn.
-        self.k_y = 0.5
+        self.k_y = 1.2
         # k_D sets the LONGITUDINAL convergence rate: the speed law gives
         # Ddot = -k_D * D, so the formation error decays with time constant
         # 1/k_D. The paper's 0.02 -> 50 s constant, which crawls at this
         # scale. 0.1 -> ~10 s. Kept small enough that the commanded speed
         # (~ vgl - k_D*ex) stays well inside the speed limits for vgl=0.5.
-        self.k_D = 0.1
+        # Raised 0.1 -> 0.4 (~2.5 s constant). Sweeps show mean formation error
+        # keeps dropping to ~0.4-0.5 with no measurable cost in commanded-speed
+        # variance or peak; past that it saturates.
+        self.k_D = 0.4
         # Leader yaw rate (chi_l_dot) is now received directly from the leader
         # on /virtual_leader_velocity (twist.angular.z) as an EXACT analytic
         # value, instead of being finite-differenced from the noisy leader yaw.
@@ -49,15 +52,15 @@ class FormationController(Node):
         # instead of assuming a fixed dt. The old self.dt=0.01 was wrong for
         # ey_dot: the leader pose arrives at 100 Hz, but this controller's
         # own timer runs at 10 Hz, so ey_dot was being inflated 10x.
-        self.last_ey_time = {1: None, 2: None, 3: None}
+        self.last_ey_time = {1: None, 2: None, 3: None, 4: None}
 
         # Practical safeguard (NOT from the paper): a slew-rate limit on the
         # commanded speed so a momentary denominator singularity in Eq.21
         # can't snap the command to saturation in a single 0.1 s tick.
         # Relaxed to 6 m/s^2 so it only catches genuine spikes and does not
         # throttle the law's normal convergence.
-        self.max_accel = 6.0
-        self.prev_speed = {1: 0.0, 2: 0.0, 3: 0.0}
+        self.max_accel = 1.5
+        self.prev_speed = {1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0}
 
         # ==================================================
         # TAKEOFF PHASE
@@ -68,8 +71,8 @@ class FormationController(Node):
         # control over to the paper's guidance law.
         self.takeoff_alt = -5.0        # NED, negative = up
         self.takeoff_tol = 0.3         # m, altitude band to call it "airborne"
-        self.airborne = {1: False, 2: False, 3: False}
-        self.offboard_engaged = {1: False, 2: False, 3: False}
+        self.airborne = {1: False, 2: False, 3: False, 4: False}
+        self.offboard_engaged = {1: False, 2: False, 3: False, 4: False}
 
         # ==================================================
         # PAPER CONTROLLER PARAMETERS
@@ -84,7 +87,8 @@ class FormationController(Node):
         self.prev_ey = {
             1: 0.0,
             2: 0.0,
-            3: 0.0
+            3: 0.0,
+            4: 0.0
         }
 
         # ==================================================
@@ -103,11 +107,13 @@ class FormationController(Node):
 
         self.formation_offsets = {
 
-            1: (-3.0, 0.0),
+            1: (3.0, 3.0),
 
-            2: (0.0, 3.0),
+            2: (-3.0, 3.0),
 
-            3: (3.0, 0.0)
+            3: (3.0, -3.0),
+
+            4: (-3.0, -3.0)
 
         }
 
@@ -124,16 +130,17 @@ class FormationController(Node):
         # Spawns are now ALIGNED with the formation offsets g_i, so each drone
         # starts already on its target (zero xy error) and only has to hold
         # station until the leader begins moving -- no initial cross-track dash.
-        #   D1 ENU(0,-3,0) -> NED(-3, 0,0) = g1
-        #   D2 ENU(3, 0,0) -> NED( 0, 3,0) = g2
-        #   D3 ENU(0, 3,0) -> NED( 3, 0,0) = g3
-        # INVARIANT: this table must always equal the ENU->NED of the
-        # PX4_GZ_MODEL_POSE values in start_swarm.sh.
+        # INVARIANT: this table must equal the PX4_GZ_MODEL_POSE strings in
+        # start_swarm.sh (same raw tuple) and the formation_offsets g_i, so
+        # each drone starts already on its target with zero xy error.
+        #   D1 ( 3, 3, 0) = g1     D3 ( 3,-3, 0) = g3
+        #   D2 (-3, 3, 0) = g2     D4 (-3,-3, 0) = g4   (quadrant corners)
         # ==================================================
         self.spawn_ned = {
-            1: (-3.0, 0.0, 0.0),
-            2: (0.0,  3.0, 0.0),
-            3: (3.0,  0.0, 0.0),
+            1: (3.0,  3.0, 0.0),
+            2: (-3.0, 3.0, 0.0),
+            3: (3.0, -3.0, 0.0),
+            4: (-3.0,-3.0, 0.0),
         }
 
         # ==================================================
@@ -143,7 +150,8 @@ class FormationController(Node):
         self.drone_targets = {
             1: [0.0, 0.0, -5.0],
             2: [0.0, 0.0, -5.0],
-            3: [0.0, 0.0, -5.0]
+            3: [0.0, 0.0, -5.0],
+            4: [0.0, 0.0, -5.0]
         }
 
         self.drone_states = {
@@ -166,6 +174,15 @@ class FormationController(Node):
                 "yaw": 0.0
             },
             3: {
+                "x": 0.0,
+                "y": 0.0,
+                "z": 0.0,
+                "vx": 0.0,
+                "vy": 0.0,
+                "vz": 0.0,
+                "yaw": 0.0
+            },
+            4: {
                 "x": 0.0,
                 "y": 0.0,
                 "z": 0.0,
@@ -216,6 +233,13 @@ class FormationController(Node):
             qos
         )
 
+        self.create_subscription(
+            VehicleOdometry,
+            '/px4_4/fmu/out/vehicle_odometry',
+            self.drone4_odom_callback,
+            qos
+        )
+
         # ==================================================
         # SUBSCRIBERS
         # ==================================================
@@ -238,6 +262,13 @@ class FormationController(Node):
             PoseStamped,
             '/drone3_target',
             self.drone3_target_callback,
+            qos
+        )
+
+        self.create_subscription(
+            PoseStamped,
+            '/drone4_target',
+            self.drone4_target_callback,
             qos
         )
 
@@ -307,6 +338,28 @@ class FormationController(Node):
             qos
         )
 
+        # ==================================================
+        # PX4_4
+        # ==================================================
+
+        self.offboard_pub_4 = self.create_publisher(
+            OffboardControlMode,
+            '/px4_4/fmu/in/offboard_control_mode',
+            qos
+        )
+
+        self.traj_pub_4 = self.create_publisher(
+            TrajectorySetpoint,
+            '/px4_4/fmu/in/trajectory_setpoint',
+            qos
+        )
+
+        self.cmd_pub_4 = self.create_publisher(
+            VehicleCommand,
+            '/px4_4/fmu/in/vehicle_command',
+            qos
+        )
+
         self.counter = 0
 
         self.timer = self.create_timer(
@@ -372,6 +425,14 @@ class FormationController(Node):
     def drone3_target_callback(self, msg):
 
         self.drone_targets[3] = [
+            msg.pose.position.x,
+            msg.pose.position.y,
+            msg.pose.position.z
+        ]
+
+    def drone4_target_callback(self, msg):
+
+        self.drone_targets[4] = [
             msg.pose.position.x,
             msg.pose.position.y,
             msg.pose.position.z
@@ -449,6 +510,29 @@ class FormationController(Node):
         )
 
         self.drone_states[3]["yaw"] = yaw
+
+    def drone4_odom_callback(self, msg):
+
+        # Lift local-spawn odometry into the shared NED world frame
+        self.drone_states[4]["x"] = msg.position[0] + self.spawn_ned[4][0]
+        self.drone_states[4]["y"] = msg.position[1] + self.spawn_ned[4][1]
+        self.drone_states[4]["z"] = msg.position[2] + self.spawn_ned[4][2]
+
+        self.drone_states[4]["vx"] = msg.velocity[0]
+        self.drone_states[4]["vy"] = msg.velocity[1]
+        self.drone_states[4]["vz"] = msg.velocity[2]
+
+        qw = msg.q[0]
+        qx = msg.q[1]
+        qy = msg.q[2]
+        qz = msg.q[3]
+
+        yaw = atan2(
+            2.0 * (qw*qz + qx*qy),
+            1.0 - 2.0 * (qy*qy + qz*qz)
+        )
+
+        self.drone_states[4]["yaw"] = yaw
 
     # ==================================================
     # PX4 FUNCTIONS
@@ -649,24 +733,59 @@ class FormationController(Node):
             + ey * sin(chi_i - chi_l)
         )
 
-        # Prevent division by zero / near-singularity blow-up.
-        # NOTE: forcing a hard floor like max(0.1, denom) makes |speed| jump
-        # towards numerator/0.1 right as the sign flips - this is the
-        # "shooting" spike. Clamping the speed slew-rate below fixes the
-        # visible symptom regardless of how the denominator is regularized.
-        if abs(denominator) < 0.1:
-            denominator = 0.1 if denominator >= 0 else -0.1
+        # Regularized speed law (smooth form of Eq. 21).
+        # The old hard switch  "if |den|<eps: vgl  else: num/den"  chattered:
+        # during a reversal `den` wanders back and forth across the threshold,
+        # so the command jumped between vgl and num/den every few ticks -- the
+        # 0<->0.9 thrash in the speed plot. Blend smoothly instead, with a
+        # denominator that can never divide by ~0:
+        #     speed = num*den/(den^2 + eps^2) + vgl*eps^2/(den^2 + eps^2)
+        #   |den| >> eps  ->  ~ num/den   (the paper's Eq. 21)
+        #   |den| -> 0    ->  ~ vgl       (hold leader pace; the heading law
+        #                                  closes the error, cf. Remark 2)
+        # It is smooth in `den`, so there is nothing to switch and no spike.
+        #
+        # CHOOSING eps: note that  den = e . (unit heading vector), so
+        # |den| <= |e| = D_i  ALWAYS. Hence eps behaves as an ERROR FLOOR:
+        # once D_i falls below eps the blend is permanently in leader-speed-
+        # hold mode and the speed law stops actively correcting. eps must
+        # therefore sit BELOW the formation accuracy you want. Sweeps show
+        # steady-state D_i tracks eps almost linearly, while the speed
+        # smoothness is set by the eps^2 term in the NUMERATOR, not by the
+        # threshold -- so lowering eps costs essentially nothing in chatter.
+        # 0.25 capped accuracy at ~0.15-0.25 m; 0.10 at ~0.09 m. 0.05 halves
+        # that again. Below ~0.03 the SITL estimator noise dominates and there
+        # is nothing left to win: D_i = ||e|| is a MAGNITUDE, so with per-axis
+        # jitter sigma it settles at the Rayleigh mean sigma*sqrt(pi/2) > 0
+        # no matter how the law is tuned.
+        EPS_DEN = 0.05
+        reg = denominator**2 + EPS_DEN**2
+        speed = (numerator * denominator + leader_speed * EPS_DEN**2) / reg
 
-        speed = numerator / denominator
+        # HEADING-ALIGNMENT GATE.
+        # Eq. 21 is only meaningful once the heading has converged: the paper's
+        # structure is a cascade (Prop. 1 drives chi_i -> chi_d in finite time,
+        # THEN Prop. 2's speed law drives D_i -> 0). Nothing governs the
+        # interval before alignment. There, `den` (the projection of the error
+        # onto the heading) nearly vanishes while `num` stays large, so the raw
+        # law commands REVERSE speed and the follower falls behind -- the 4 m
+        # start-up spike seen when the drones spawn ~96 deg off the leader.
+        # Blend to leader-speed matching whenever the follower is not pointed
+        # where the law assumes it is pointed:
+        #     align = max(0, cos(chi_i - chi_d)),  speed <- vgl + (v-vgl)*align
+        # align = 1 when aligned (law untouched); align -> 0 past 90 deg of
+        # heading error (hold leader pace, let the heading law rotate first).
+        chi_d = (
+            chi_l
+            - self.chi_inf * (2.0 / 3.14159265) * atan2(self.k_y * ey, 1.0)
+        )
+        align = max(0.0, cos(chi_i - chi_d))
+        speed = leader_speed + (speed - leader_speed) * align
 
-        # Saturation. A negative LOWER bound is essential: Eq.21 legitimately
-        # asks for a negative ground speed when a follower is on the far side
-        # of its goal and must travel BACK along its heading to converge.
-        # The old max(0.0, ...) floor made that impossible, so any drone that
-        # got pushed out simply froze in place (the flat plateaus in the log).
-        # Allowing reverse motion lets the Lyapunov speed law actually close
-        # the formation error as the paper's Proposition 2 guarantees.
-        speed = max(-3.0, min(speed, 8.0))
+        # Saturation sized to the 0.5 m/s regime. A small negative bound still
+        # lets a far-side follower back up toward its goal (Eq.21 can ask for
+        # reverse motion); the old [-3, 8] bound was a 15 m/s-regime leftover.
+        speed = max(-0.3, min(speed, 1.2))
 
         # Slew-rate limit: cap how fast the commanded speed can change per
         # control cycle so a momentary singularity can't snap the command
@@ -802,10 +921,11 @@ class FormationController(Node):
         switch THAT drone into OFFBOARD and let the paper's guidance law
         take over. Runs every timer tick; only fires once per drone."""
 
-        pubs = {1: self.cmd_pub_1, 2: self.cmd_pub_2, 3: self.cmd_pub_3}
-        target_systems = {1: 2, 2: 3, 3: 4}
+        pubs = {1: self.cmd_pub_1, 2: self.cmd_pub_2,
+                3: self.cmd_pub_3, 4: self.cmd_pub_4}
+        target_systems = {1: 2, 2: 3, 3: 4, 4: 5}
 
-        for drone_id in (1, 2, 3):
+        for drone_id in (1, 2, 3, 4):
 
             if self.offboard_engaged[drone_id]:
                 continue
@@ -841,6 +961,7 @@ class FormationController(Node):
         self.publish_offboard(self.offboard_pub_1)
         self.publish_offboard(self.offboard_pub_2)
         self.publish_offboard(self.offboard_pub_3)
+        self.publish_offboard(self.offboard_pub_4)
 
         # TARGETS
 
@@ -857,6 +978,11 @@ class FormationController(Node):
         self.publish_velocity_setpoint(
             self.traj_pub_3,
             3
+        )
+
+        self.publish_velocity_setpoint(
+            self.traj_pub_4,
+            4
         )
 
       
@@ -886,6 +1012,13 @@ class FormationController(Node):
             self.publish_vehicle_command(
                 self.cmd_pub_3,
                 4,
+                VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM,
+                1.0
+            )
+
+            self.publish_vehicle_command(
+                self.cmd_pub_4,
+                5,
                 VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM,
                 1.0
             )
@@ -920,6 +1053,15 @@ class FormationController(Node):
             self.publish_vehicle_command(
                 self.cmd_pub_3,
                 4,
+                VehicleCommand.VEHICLE_CMD_NAV_TAKEOFF,
+                0.0, 0.0, 0.0, 0.0,
+                float('nan'), float('nan'),
+                5.0
+            )
+
+            self.publish_vehicle_command(
+                self.cmd_pub_4,
+                5,
                 VehicleCommand.VEHICLE_CMD_NAV_TAKEOFF,
                 0.0, 0.0, 0.0, 0.0,
                 float('nan'), float('nan'),

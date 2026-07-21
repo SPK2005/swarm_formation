@@ -16,7 +16,7 @@ cd ~/PX4-Autopilot
 PX4_GZ_STANDALONE=1 \
 PX4_SYS_AUTOSTART=4001 \
 PX4_GZ_MODEL=x500 \
-PX4_GZ_MODEL_POSE='-3,0,0' \
+PX4_GZ_MODEL_POSE='3,3,0,0,0,1.5708' \
 ./build/px4_sitl_default/bin/px4 -i 1;
 exec bash
 "
@@ -29,7 +29,7 @@ gnome-terminal -- bash -c "
 cd ~/PX4-Autopilot
 PX4_SYS_AUTOSTART=4001 \
 PX4_GZ_MODEL=x500 \
-PX4_GZ_MODEL_POSE='0,3,0' \
+PX4_GZ_MODEL_POSE='-3,3,0,0,0,1.5708' \
 ./build/px4_sitl_default/bin/px4 -i 2;
 exec bash
 "
@@ -42,8 +42,21 @@ gnome-terminal -- bash -c "
 cd ~/PX4-Autopilot
 PX4_SYS_AUTOSTART=4001 \
 PX4_GZ_MODEL=x500 \
-PX4_GZ_MODEL_POSE='3,0,0' \
+PX4_GZ_MODEL_POSE='3,-3,0,0,0,1.5708' \
 ./build/px4_sitl_default/bin/px4 -i 3;
+exec bash
+"
+
+sleep 3
+
+echo "Starting PX4 Instance 4..."
+
+gnome-terminal -- bash -c "
+cd ~/PX4-Autopilot
+PX4_SYS_AUTOSTART=4001 \
+PX4_GZ_MODEL=x500 \
+PX4_GZ_MODEL_POSE='-3,-3,0,0,0,1.5708' \
+./build/px4_sitl_default/bin/px4 -i 4;
 exec bash
 "
 

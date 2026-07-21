@@ -38,19 +38,22 @@ class SwarmVisualizer(Node):
         self.drone1 = None
         self.drone2 = None
         self.drone3 = None
+        self.drone4 = None
 
         # PX4 odometry is per-spawn-origin; add each drone's spawn offset
-        # (NED, from start_swarm.sh ENU poses) to share one world frame.
+        # (NED, from start_swarm.sh poses) to share one world frame.
         self.spawn_ned = {
-            1: (-3.0, 0.0, 0.0),
-            2: (0.0,  3.0, 0.0),
-            3: (3.0,  0.0, 0.0),
+            1: (3.0,  3.0, 0.0),
+            2: (-3.0, 3.0, 0.0),
+            3: (3.0, -3.0, 0.0),
+            4: (-3.0,-3.0, 0.0),
         }
 
         self.leader_history = []
         self.d1_history = []
         self.d2_history = []
         self.d3_history = []
+        self.d4_history = []
 
         self.max_points = 500
 
@@ -79,6 +82,13 @@ class SwarmVisualizer(Node):
             VehicleOdometry,
             '/px4_3/fmu/out/vehicle_odometry',
             self.drone3_callback,
+            px4_qos
+        )
+
+        self.create_subscription(
+            VehicleOdometry,
+            '/px4_4/fmu/out/vehicle_odometry',
+            self.drone4_callback,
             px4_qos
         )
 
@@ -153,6 +163,22 @@ class SwarmVisualizer(Node):
 
         if len(self.d3_history) > self.max_points:
             self.d3_history.pop(0)
+
+    def drone4_callback(self, msg):
+
+        sx, sy, sz = self.spawn_ned[4]
+        pos = (
+            msg.position[0] + sx,
+            msg.position[1] + sy,
+            msg.position[2] + sz
+        )
+
+        self.drone4 = pos
+
+        self.d4_history.append(pos)
+
+        if len(self.d4_history) > self.max_points:
+            self.d4_history.pop(0)
 
     def create_marker(self, marker_id, pos, r, g, b):
 
@@ -265,6 +291,17 @@ class SwarmVisualizer(Node):
                 )
             )
 
+        if self.drone4 is not None:
+            markers.markers.append(
+                self.create_marker(
+                    4,
+                    self.drone4,
+                    0.0,
+                    1.0,
+                    1.0
+                )
+            )
+
         if len(self.leader_history) > 2:
             markers.markers.append(
                 self.create_trail(
@@ -306,6 +343,17 @@ class SwarmVisualizer(Node):
                     1.0,
                     1.0,
                     0.0
+                )
+            )
+
+        if len(self.d4_history) > 2:
+            markers.markers.append(
+                self.create_trail(
+                    104,
+                    self.d4_history,
+                    0.0,
+                    1.0,
+                    1.0
                 )
             )
 

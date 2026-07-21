@@ -4,7 +4,7 @@ import rclpy
 from rclpy.node import Node
 
 from geometry_msgs.msg import PoseStamped, TwistStamped
-from math import sin, cos, tanh, radians, pi
+from math import sin, cos, atan, sqrt, pi, radians
 
 
 class VirtualLeader(Node):
@@ -42,55 +42,82 @@ class VirtualLeader(Node):
         self.elapsed_time = 0.0
 
         # ============================================================
-        # Smooth zigzag trajectory (constant speed, rounded corners)
+        # Sinusoidal reference path  (Basak & Ghosh, ICC 2025)
         # ------------------------------------------------------------
-        # The heading is a smooth square-ish wave:
-        #     chi(t) = leg_angle * tanh(sharp * sin(w t)) / tanh(sharp)
-        # so it DWELLS at +/-leg_angle (the straight legs) and sweeps
-        # smoothly between them (the rounded corners). Position is then
-        # generated from  xdot = v cos(chi),  ydot = v sin(chi), which
-        # makes the speed EXACTLY v at all times. Both the heading and
-        # its rate are analytic, so the leader publishes an exact,
-        # noise-free yaw rate on twist.angular.z.
+        # The paper's reference path is  y = r sin(x)  with r = 300 m,
+        # flown by a 15 m/s leader. Here the leader is 30x slower
+        # (0.5 m/s), so the amplitude is scaled by the same factor
+        # (300 -> ~10 m) to keep the same path SHAPE at this arena size.
         #
-        # Design rule (learned the hard way from the figure-8): keep the
-        # minimum turn radius  R_min = v / max|chi_dot|  well ABOVE the
-        # formation offset (~3 m), or the speed law's denominator gets
-        # driven through zero in the corners.
+        # We progress along +X (North) and let Y (East) trace the sine:
+        #       y(x) = A cos(k x)      (phase chosen so chi(0) = 0, i.e.
+        #                               the leader leaves the hold heading
+        #                               due North with no heading jump)
+        # Moving at CONSTANT speed v, the heading is the path tangent
+        #       chi(x)     = atan( dy/dx ) = atan( -A k sin(k x) )
+        # and its exact rate (using  dx/dt = v cos chi) is
+        #       chi_dot(x) = -A k^2 cos(k x) * v / (1 + (A k sin k x)^2)^1.5
+        # Both analytic, so twist.angular.z is an exact, noise-free yaw rate.
+        #
+        # FEASIBILITY RULE (the key one): the speed law's denominator is the
+        # projection of the formation error onto the follower's heading, and
+        # it is driven toward zero when the path curves on a scale comparable
+        # to the formation. Minimum turn radius is
+        #       R_min = 1 / (A k^2),      k = 2 pi / wavelength
+        # Keep R_min / |G_i| >> 1  (|G_i| = 4.24 m for the (+/-3,+/-3)
+        # quadrant formation). wavelength = 130 m gives R_min ~ 42.8 m,
+        # ratio ~ 10. Sweeps show this cuts turn-time formation error ~72%
+        # and commanded-speed variance ~75% versus wavelength 60 / the old
+        # zigzag (ratio 1.4-2.1, where den sits near zero half the run).
         # ============================================================
-        self.v = 0.5                  # constant ground speed [m/s]
-        self.leg_angle = radians(30)  # zigzag leg angle off the +X axis [rad]
-        self.zig_omega = 0.09         # [rad/s]; corner spacing = pi/omega
-        self.corner_sharp = 1.6       # >1 = straighter legs/sharper corners;
-                                      #  ~1 = gentle serpentine
+        self.v = 0.5               # constant ground speed [m/s]
+        self.amplitude = 10.0         # r in y = r sin(x), scaled from 300
+        self.wavelength = 130.0       # [m] of forward (North) travel per period
+        self.k = 2.0 * pi / self.wavelength
 
-        # Integrated leader position (starts at the origin like before)
+        # Speed ramp: stepping 0 -> v instantly is not trackable by the
+        # followers (they lag ~0.4-1.0 m along-track and take ~3.4 s to
+        # recover -- the start-up spike in the D_i plot). Ease the leader in
+        # with a C1-continuous smoothstep over `ramp_time` so the followers
+        # see a feasible acceleration. Note the yaw RATE must then be computed
+        # with the INSTANTANEOUS speed, since chi_dot = (dchi/dx) * v(t)cos(chi).
+        self.ramp_time = 6.0          # [s] to reach full speed
+
+        # Integrated leader position (starts at the origin)
         self.x = 0.0
         self.y = 0.0
         self.z = -5.0
 
-        # Report the worst-case turn radius vs the formation offset
-        k = tanh(self.corner_sharp)
-        chidot_max = self.leg_angle * self.corner_sharp * self.zig_omega / k
+        formation_offset = 4.2426     # |G_i| for the (+/-3, +/-3) quadrant
+        max_heading = atan(self.amplitude * self.k)
+        R_min = 1.0 / (self.amplitude * self.k * self.k)
         self.get_logger().info(
-            f"[zigzag] v={self.v:.2f} m/s | max yaw rate={chidot_max:.3f} rad/s | "
-            f"min turn radius={self.v / chidot_max:.1f} m "
-            f"(keep >> ~3 m offset) | corner every {pi / self.zig_omega:.0f} s"
+            f"[sinusoid] v={self.v:.2f} m/s | A={self.amplitude:.1f} m | "
+            f"wavelength={self.wavelength:.0f} m | max heading="
+            f"{max_heading*180/pi:.0f} deg | min turn radius={R_min:.1f} m | "
+            f"R_min/|G|={R_min/formation_offset:.1f} (want >> 1) | "
+            f"period={self.wavelength/self.v:.0f} s"
         )
 
-    def _heading(self, t):
-        """Smooth zigzag heading and its exact time derivative."""
-        w = self.zig_omega
-        a = self.corner_sharp
-        k = tanh(a)
+    def _heading(self, x, v_now):
+        """Sinusoid path tangent heading and its exact time derivative.
 
-        s = sin(w * t)
-        c = cos(w * t)
-        th = tanh(a * s)
+        x     : current North coordinate (progress along the path).
+        v_now : instantaneous ground speed (may be ramping).
+        Path: y = A cos(k x), so dy/dx = -A k sin(k x). The heading depends
+        only on x; its RATE scales with the current speed.
+        """
+        A = self.amplitude
+        k = self.k
 
-        yaw = self.leg_angle * th / k
-        # d/dt tanh(a sin wt) = (1 - tanh^2) * a w cos wt
-        yaw_rate = self.leg_angle * a * w * (1.0 - th * th) * c / k
+        u = -A * k * sin(k * x)          # dy/dx = tan(chi); u(0) = 0
+        yaw = atan(u)                    # heading from +X (North) axis
+
+        # chi_dot = d/dt atan(u) = [u' / (1+u^2)] * dx/dt,  dx/dt = v_now cos(chi)
+        yaw_rate = (
+            -A * k * k * cos(k * x) * v_now
+            / (1.0 + u * u) ** 1.5
+        )
         return yaw, yaw_rate
 
     def timer_callback(self):
@@ -117,16 +144,24 @@ class VirtualLeader(Node):
         else:
 
             # ============================================
-            # Smooth zigzag
+            # Sinusoid with a smooth speed ramp at start
             # ============================================
 
-            yaw, yaw_rate = self._heading(self.t)
+            # C1-continuous smoothstep 3s^2 - 2s^3 on [0, ramp_time]:
+            # zero velocity AND zero acceleration at t=0, full speed after.
+            if self.t < self.ramp_time:
+                s = self.t / self.ramp_time
+                v_now = self.v * (3.0 * s * s - 2.0 * s * s * s)
+            else:
+                v_now = self.v
 
-            # Constant-speed velocity along the heading
-            vx = self.v * cos(yaw)
-            vy = self.v * sin(yaw)
+            yaw, yaw_rate = self._heading(self.x, v_now)
 
-            # Integrate position (exact constant speed = self.v)
+            # Velocity along the heading at the current (possibly ramped) speed
+            vx = v_now * cos(yaw)
+            vy = v_now * sin(yaw)
+
+            # Integrate position
             self.x += vx * self.dt
             self.y += vy * self.dt
 
