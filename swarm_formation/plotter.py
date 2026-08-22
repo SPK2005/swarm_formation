@@ -3,32 +3,9 @@
 formation_logger.py
 
 ROS 2 logging node for the virtual-leader multi-UAV formation path-following
-stack. Captures everything needed to reproduce the six result-section plots
-from Basak & Ghosh (ICC 2025):
-
-  Fig 4a  Leader + follower trajectories          <- {leader,f*}_x , _y
-  Fig 4b  Follower turn-rate                       <- f*_chidot
-  Fig 4c  Follower speed profile                   <- f*_speed
-  Fig 5a  UAV heading  (chi_i -> chi_l)            <- leader_chi , f*_chi
-  Fig 5b  Distance / formation error D_i           <- f*_Di
-  Fig 5c  Follower position in leader body frame   <- f*_xL , f*_yL
-
-WIRED TO THE ACTUAL SYSTEM (matches follower_controller.py / swarm_visualizer.py)
---------------------------------------------------------------------------------
-* Leader pose     : /virtual_leader_pose      geometry_msgs/PoseStamped
-                    -> position (x,y) and heading chi_l = yaw(quaternion)
-* Leader velocity : /virtual_leader_velocity  geometry_msgs/TwistStamped
-                    -> speed = |twist.linear|, chi_l_dot = twist.angular.z
-* Followers       : /px4_N/fmu/out/vehicle_odometry   px4_msgs/VehicleOdometry
-                    -> position[] (+spawn_ned offset), velocity[], q -> yaw,
-                       angular_velocity[2] -> turn rate
-
-Heading (chi) is the quaternion YAW for both leader and followers -- exactly the
-quantity the controller aligns (it commands TrajectorySetpoint.yaw = chi_c, and
-PX4 steers vehicle yaw toward chi_l). Yaw is always defined, so rows are written
-from the first sample regardless of speed. Formation errors, D_i and the leader-
-body-frame position are computed here from the raw states + the known offsets
-G_i, so the logger stays independent of the controller internals.
+stack. Logs leader + follower pose/speed/heading and derived formation errors
+(D_i, exi, eyi) to CSV, computed from raw states + the known offsets G_i so
+the logger stays independent of the controller internals.
 """
 
 import csv
@@ -51,13 +28,9 @@ from geometry_msgs.msg import PoseStamped, TwistStamped
 from px4_msgs.msg import VehicleOdometry
 
 
-# ----------------------------------------------------------------------------
-# CONFIG  -- these mirror follower_controller.py; keep them in sync
-# ----------------------------------------------------------------------------
-
+# mirrors follower_controller.py; keep in sync
 LEADER_POSE_TOPIC = "/virtual_leader_pose"        # PoseStamped
 LEADER_VEL_TOPIC = "/virtual_leader_velocity"     # TwistStamped
-
 
 @dataclass
 class FollowerCfg:
@@ -79,10 +52,6 @@ FOLLOWERS: List[FollowerCfg] = [
 # Seconds between diagnostic heartbeat log lines (0 disables).
 DIAG_PERIOD_S = 2.0
 
-
-# ----------------------------------------------------------------------------
-# helpers
-# ----------------------------------------------------------------------------
 
 def wrap_pi(a: float) -> float:
     """Wrap angle to (-pi, pi]."""
@@ -123,27 +92,26 @@ class FollowerState:
     n_msgs: int = 0
 
 
-# ----------------------------------------------------------------------------
-# node
-# ----------------------------------------------------------------------------
-
 class FormationLogger(Node):
     def __init__(self):
         super().__init__("formation_logger")
 
         self.declare_parameter("output_dir", os.path.expanduser("~/formation_logs"))
         self.declare_parameter("log_rate_hz", 50.0)
+        self.declare_parameter("num_followers", 4)
 
         out_dir = self.get_parameter("output_dir").value
         rate = float(self.get_parameter("log_rate_hz").value)
+        n_foll = int(self.get_parameter("num_followers").value)
+        if not 1 <= n_foll <= len(FOLLOWERS):
+            raise ValueError(
+                f"num_followers={n_foll} outside 1..{len(FOLLOWERS)}")
+        self.followers: List[FollowerCfg] = FOLLOWERS[:n_foll]
 
         os.makedirs(out_dir, exist_ok=True)
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.csv_path = os.path.join(out_dir, f"formation_{stamp}.csv")
 
-        # QoS matching the working consumer nodes:
-        #  - PX4 VehicleOdometry: BEST_EFFORT / VOLATILE / depth 10 (controller)
-        #  - leader topics:       default reliable (depth 10)
         px4_qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
             durability=DurabilityPolicy.VOLATILE,
@@ -152,15 +120,15 @@ class FormationLogger(Node):
         )
 
         self.leader = LeaderState()
-        self.foll: Dict[str, FollowerState] = {f.name: FollowerState() for f in FOLLOWERS}
-        self.fcfg: Dict[str, FollowerCfg] = {f.name: f for f in FOLLOWERS}
+        self.foll: Dict[str, FollowerState] = {f.name: FollowerState() for f in self.followers}
+        self.fcfg: Dict[str, FollowerCfg] = {f.name: f for f in self.followers}
 
         # --- subscriptions --------------------------------------------------
         self.create_subscription(PoseStamped, LEADER_POSE_TOPIC,
                                  self._leader_pose_cb, 10)
         self.create_subscription(TwistStamped, LEADER_VEL_TOPIC,
                                  self._leader_vel_cb, 10)
-        for f in FOLLOWERS:
+        for f in self.followers:
             self.create_subscription(
                 VehicleOdometry, f.odom_topic, self._make_foll_cb(f.name), px4_qos)
             self.get_logger().info(f"subscribed {f.name} <- {f.odom_topic}")
@@ -173,7 +141,10 @@ class FormationLogger(Node):
         self._writer.writerow(self._header())
         self._t0: Optional[float] = None
         self._rows = 0
-        self.get_logger().info(f"logging to {self.csv_path}")
+        self.get_logger().info(
+            f"logging to {self.csv_path} "
+            f"({len(self.followers)} follower(s): "
+            f"{', '.join(f.name for f in self.followers)})")
 
         # --- timers ---------------------------------------------------------
         self.create_timer(1.0 / rate, self._on_timer)
@@ -202,15 +173,12 @@ class FormationLogger(Node):
         off = self.fcfg[name].spawn_ned
         def cb(msg: VehicleOdometry):
             s = self.foll[name]
-            # position (NED) lifted into shared world frame via spawn offset
             s.x = msg.position[0] + off[0]
             s.y = msg.position[1] + off[1]
             s.vx = msg.velocity[0]
             s.vy = msg.velocity[1]
             s.speed = math.hypot(s.vx, s.vy)
-            # PX4 quaternion order is [w, x, y, z]
-            s.chi = yaw_from_quat(msg.q[0], msg.q[1], msg.q[2], msg.q[3])
-            # body-frame yaw rate as the achieved turn rate
+            s.chi = yaw_from_quat(msg.q[0], msg.q[1], msg.q[2], msg.q[3])  # [w,x,y,z]
             s.chidot = msg.angular_velocity[2]
             s.got = True
             s.n_msgs += 1
@@ -220,7 +188,7 @@ class FormationLogger(Node):
     def _header(self) -> List[str]:
         cols = ["t", "leader_x", "leader_y", "leader_chi",
                 "leader_speed", "leader_chidot"]
-        for f in FOLLOWERS:
+        for f in self.followers:
             n = f.name
             cols += [f"{n}_x", f"{n}_y", f"{n}_chi",
                      f"{n}_speed", f"{n}_chidot",
@@ -232,11 +200,9 @@ class FormationLogger(Node):
     # ----------------------------------------------------------------- timer
     def _on_timer(self):
         lead = self.leader
-        # gate: leader pose + every follower odom (velocity fills in when it
-        # arrives; not required, so a slow velocity topic never blocks logging)
         if not lead.got_pose:
             return
-        if not all(self.foll[f.name].got for f in FOLLOWERS):
+        if not all(self.foll[f.name].got for f in self.followers):
             return
 
         now = self.get_clock().now().nanoseconds * 1e-9
@@ -249,15 +215,15 @@ class FormationLogger(Node):
                f"{lead.speed:.4f}", f"{lead.chidot:.6f}"]
 
         c, s = math.cos(lead.chi), math.sin(lead.chi)
-        for f in FOLLOWERS:
+        for f in self.followers:
             st = self.foll[f.name]
             gxi, gyi = f.goal_offset
 
             dx, dy = st.x - lead.x, st.y - lead.y
-            xL = c * dx + s * dy            # rotate into leader body frame
+            xL = c * dx + s * dy
             yL = -s * dx + c * dy
-            exi = xL - gxi                  # longitudinal error (eq. 7)
-            eyi = yL - gyi                  # lateral error      (eq. 8)
+            exi = xL - gxi                  # eq. 7
+            eyi = yL - gyi                  # eq. 8
             Di = math.hypot(exi, eyi)
             chi_err = wrap_pi(st.chi - lead.chi)
 
@@ -275,7 +241,7 @@ class FormationLogger(Node):
         lead = self.leader
         parts = [f"leader:pose{lead.n_pose}/vel{lead.n_vel}"
                  f"{'' if lead.got_pose else '(NO POSE)'}"]
-        for f in FOLLOWERS:
+        for f in self.followers:
             st = self.foll[f.name]
             parts.append(f"{f.name}:{st.n_msgs}"
                          f"{'' if st.got else '(NONE)'}")
@@ -283,7 +249,7 @@ class FormationLogger(Node):
         if not lead.got_pose:
             blocker = " BLOCKED: no leader pose on " + LEADER_POSE_TOPIC
         else:
-            missing = [f.name for f in FOLLOWERS if not self.foll[f.name].got]
+            missing = [f.name for f in self.followers if not self.foll[f.name].got]
             if missing:
                 blocker = f" BLOCKED: no vehicle_odometry from {missing}"
             elif not lead.got_vel:
@@ -311,7 +277,8 @@ def main(args=None):
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == "__main__":
