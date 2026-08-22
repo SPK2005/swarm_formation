@@ -2,16 +2,26 @@
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>swarm_formation</name>
-  <version>0.0.0</version>
-  <description>TODO: Package description</description>
-  <maintainer email="spk@todo.todo">spk</maintainer>
-  <license>TODO: License declaration</license>
+  <version>0.2.0</version>
+  <description>
+    Virtual leader-based multi-UAV formation path-following guidance using
+    vector fields, implemented on PX4 SITL quadrotors. Implements and extends
+    the heading law (Eq. 15) and epsilon-regularised ground-speed law (Eq. 21)
+    of Basak and Ghosh, Indian Control Conference 2025.
+  </description>
+  <maintainer email="spk@todo.todo">SPK</maintainer>
+  <license>MIT</license>
 
   <depend>rclpy</depend>
   <depend>visualization_msgs</depend>
   <depend>geometry_msgs</depend>
   <depend>px4_msgs</depend>
   <depend>nav_msgs</depend>
+
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>rviz2</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>

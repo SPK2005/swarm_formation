@@ -1,10 +1,26 @@
+# Python / ament
 __pycache__/
 *.pyc
 *.pyo
+*.egg-info/
+build/
+install/
+log/
 
+# Editors
 .vscode/
 .idea/
 
+# ROS bags
 *.db3
 *.mcap
 *.bag
+
+# Runtime logs written by start_swarm.sh
+logs/
+*.log
+formation_*.csv
+!data/formation_*.csv
+
+# Screenshots / scratch
+*.dot
