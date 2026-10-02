@@ -21,6 +21,10 @@ setup(
         # the script lands in share/ and is invoked by absolute path from the
         # README. Kept out of lib/ so colcon does not try to treat it as an
         # entry point.
+        #
+        # NOTE: data_files does not reliably preserve the executable bit. If
+        # the installed copy comes out non-executable, either invoke it as
+        # `bash <path>` or chmod +x it after install.
         (os.path.join('share', package_name, 'scripts'),
          glob('scripts/*.sh')),
     ],
@@ -34,12 +38,23 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
+            # --- leaders ---
             'straight_line_leader = swarm_formation.straight_line_leader:main',
             'circle_leader        = swarm_formation.circle_leader:main',
             'figure8_leader       = swarm_formation.figure8_leader:main',
+            # NEW: sinusoidal reference path (paper Sec. IV, y = r sin x).
+            # Also publishes /virtual_leader_accel with the analytic
+            # chi_l_ddot needed by the follower's dDelta/dt feedforward.
+            'sinusoid_leader      = swarm_formation.sinusoid_leader:main',
+            # --- guidance ---
             'formation_manager    = swarm_formation.formation_manager:main',
             'follower_controller  = swarm_formation.follower_controller:main',
+            # --- tooling ---
             'swarm_visualizer     = swarm_formation.swarm_visualizer:main',
+            # WAS MISSING: without this entry point, `ros2 run
+            # swarm_formation formation_logger` and any launch-file
+            # Node(executable='formation_logger') both fail to resolve.
+            'formation_logger     = swarm_formation.formation_logger:main',
             'plotter              = swarm_formation.plotter:main',
         ],
     },
